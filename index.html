@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>A Warming Planet | Narrative Visualization</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3-svg-annotation@2.5.1/d3-annotation.min.js"></script>
+<style>
+  :root{
+    --bg:#0f1420;
+    --panel:#161d2e;
+    --ink:#eef1f8;
+    --muted:#9aa4b8;
+    --accent:#ff6b4a;
+    --accent2:#5ec8ff;
+    --line:#2a3348;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0; padding:0; background:var(--bg); color:var(--ink);
+    font-family:"Segoe UI", -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif;}
+  #app{max-width:980px; margin:0 auto; padding:28px 20px 60px;}
+  header{margin-bottom:6px;}
+  header h1{font-size:1.6rem; margin:0 0 4px; font-weight:700; letter-spacing:-0.01em;}
+  header p.sub{color:var(--muted); margin:0; font-size:0.95rem;}
+
+  #progress{display:flex; gap:8px; margin:18px 0 6px;}
+  .dot{width:10px; height:10px; border-radius:50%; background:var(--line); cursor:pointer;
+       transition:background .2s;}
+  .dot.active{background:var(--accent);}
+  .dot.done{background:var(--accent2);}
+
+  #scene-panel{background:var(--panel); border:1px solid var(--line); border-radius:14px;
+    padding:18px 20px 8px; margin-top:10px;}
+  #scene-title{font-size:1.15rem; font-weight:700; margin:0 0 2px;}
+  #scene-caption{color:var(--muted); font-size:0.92rem; margin:0 0 10px; line-height:1.4; max-width:640px;}
+
+  svg{display:block;}
+  .axis path,.axis line{stroke:var(--line);}
+  .axis text{fill:var(--muted); font-size:11px;}
+  .gridline{stroke:var(--line); stroke-opacity:0.5;}
+  .zero-line{stroke:#5a6480; stroke-dasharray:4 3;}
+  .anomaly-line{fill:none; stroke:var(--accent2); stroke-width:2.2px;}
+  .anomaly-area{fill:var(--accent2); opacity:0.08;}
+  .dot-point{fill:var(--accent2); stroke:var(--panel); stroke-width:1px;}
+  .dot-point.hover{fill:var(--accent); r:5;}
+  .dot-point.hot{fill:var(--accent);}
+  .annotation-note-title{fill:var(--ink) !important; font-weight:700 !important;}
+  .annotation-note-label{fill:var(--muted) !important;}
+  .annotation-note-bg{fill:#1e2740; opacity:0.94;}
+  .annotation path{stroke:var(--accent);}
+
+  #controls{display:flex; justify-content:space-between; align-items:center;
+    margin-top:14px; padding:12px 4px 18px;}
+  button.nav{background:var(--accent); color:#161d2e; border:none; border-radius:8px;
+    padding:9px 18px; font-weight:700; font-size:0.9rem; cursor:pointer;}
+  button.nav:disabled{opacity:0.35; cursor:not-allowed;}
+  button.nav.secondary{background:transparent; color:var(--ink); border:1px solid var(--line);}
+
+  #explore-controls{display:none; gap:8px; flex-wrap:wrap; margin:4px 0 14px;}
+  #explore-controls button{background:var(--panel); border:1px solid var(--line); color:var(--ink);
+    padding:6px 12px; border-radius:20px; font-size:0.82rem; cursor:pointer;}
+  #explore-controls button.active{background:var(--accent2); color:#0f1420; border-color:var(--accent2); font-weight:700;}
+
+  #tooltip{position:absolute; pointer-events:none; background:#1e2740; border:1px solid var(--line);
+    border-radius:8px; padding:6px 10px; font-size:0.8rem; color:var(--ink); opacity:0;
+    transition:opacity .1s; box-shadow:0 4px 14px rgba(0,0,0,0.4);}
+  #tooltip b{color:var(--accent2);}
+
+  footer{margin-top:10px; color:var(--muted); font-size:0.78rem; text-align:center;}
+  a{color:var(--accent2);}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>A Warming Planet</h1>
+    <p class="sub">Global surface temperature anomaly (&deg;C relative to the 1951&ndash;1980 average)</p>
+  </header>
+
+  <div id="progress"></div>
+
+  <div id="scene-panel">
+    <h2 id="scene-title"></h2>
+    <p id="scene-caption"></p>
+    <div id="explore-controls"></div>
+    <svg id="chart" width="920" height="460"></svg>
+  </div>
+
+  <div id="controls">
+    <button class="nav secondary" id="btnBack">&larr; Back</button>
+    <span id="scene-indicator" style="color:var(--muted);font-size:0.82rem;"></span>
+    <button class="nav" id="btnNext">Next &rarr;</button>
+  </div>
+
+  <footer>Data: NASA GISTEMP v4, global annual mean (J&ndash;D) Land-Ocean Temperature Index, loaded at runtime from data.csv. Built with D3.js v7 and d3-annotation.</footer>
+</div>
+<div id="tooltip"></div>
+
+<script>
+/* =========================================================================
+   DATA
+   Loaded at runtime from data.csv
+   ========================================================================= */
+let DATA = [];
+
+/* =========================================================================
+   PARAMETERS
+   ========================================================================= */
+const state = {
+  currentScene: 0,          // 0,1,2 --> controls which scene is rendered
+  sceneCount: 3,
+  activeDecadeFilter: null, // only used in scene 2 (free exploration)
+  hoveredYear: null         // only used in scene 2 (tooltip trigger)
+};
+
+let SCENES = []; // built once DATA is loaded so titles can reference real min/max years
+
+/* =========================================================================
+   SVG / SCALES
+   ========================================================================= */
+const svg = d3.select("#chart");
+const margin = {top: 30, right: 40, bottom: 40, left: 55};
+const width = +svg.attr("width") - margin.left - margin.right;
+const height = +svg.attr("height") - margin.top - margin.bottom;
+
+const root = svg.append("g").attr("transform", `translate(${margin.left}, ${margin.top})`);
+const gGrid = root.append("g").attr("class", "grid-layer");
+const gAxes = root.append("g").attr("class", "axes-layer");
+const gData = root.append("g").attr("class", "data-layer");
+const gAnno = root.append("g").attr("class", "anno-layer");
+
+const tooltip = d3.select("#tooltip");
+
+/* =========================================================================
+   HELPERS
+   ========================================================================= */
+function clearLayers(){
+  gGrid.selectAll("*").remove();
+  gAxes.selectAll("*").remove();
+  gData.selectAll("*").remove();
+  gAnno.selectAll("*").remove();
+}
+
+function drawAxes(x, y){
+  gGrid.append("g")
+    .selectAll("line")
+    .data(y.ticks(6))
+    .join("line")
+      .attr("class", "gridline")
+      .attr("x1", 0).attr("x2", width)
+      .attr("y1", d => y(d)).attr("y2", d => y(d));
+
+  gAxes.append("g")
+    .attr("class", "axis x-axis")
+    .attr("transform", `translate(0,${height})`)
+    .call(d3.axisBottom(x).tickFormat(d3.format("d")).ticks(10));
+
+  gAxes.append("g")
+    .attr("class", "axis y-axis")
+    .call(d3.axisLeft(y).ticks(6).tickFormat(d => (d > 0 ? "+" : "") + d.toFixed(1) + "\u00b0"));
+
+  gAxes.append("line")
+    .attr("class", "zero-line")
+    .attr("x1", 0).attr("x2", width)
+    .attr("y1", y(0)).attr("y2", y(0));
+}
+
+function lineFor(x, y){
+  return d3.line().x(d => x(d.y)).y(d => y(d.a)).curve(d3.curveMonotoneX);
+}
+
+function areaFor(x, y){
+  return d3.area().x(d => x(d.y)).y0(y(0)).y1(d => y(d.a)).curve(d3.curveMonotoneX);
+}
+
+// Consistent annotation template used in every scene
+function addAnnotations(annotations){
+  const makeAnnotations = d3.annotation()
+    .type(d3.annotationLabel)
+    .annotations(annotations);
+  gAnno.append("g").attr("class", "annotation-group").call(makeAnnotations);
+}
+
+function buildAnnotations(x, y, specs, wrap = 148){
+  return specs.map(s => {
+    const xPos = x(s.yr), yPos = y(s.val);
+    const side = s.side || (xPos < width * 0.55 ? "left" : "right");
+
+    let dx = side === "left" ? 55 : -55;
+    let noteX = xPos + dx;
+    if (side === "left") {
+      noteX = Math.min(noteX, width - wrap - 8);
+    } else {
+      noteX = Math.max(noteX, wrap + 8);
+    }
+    dx = noteX - xPos;
+
+    let dy = s.dy !== undefined ? s.dy : -55;
+    let noteY = yPos + dy;
+    noteY = Math.max(14, Math.min(noteY, height - 78));
+    dy = noteY - yPos;
+
+    return {
+      note: {title: s.title, label: s.label, wrap, align: side},
+      x: xPos, y: yPos, dx, dy, subject: {radius: 5}
+    };
+  });
+}
+
+function updateProgress(){
+  const dots = d3.select("#progress").selectAll(".dot").data(d3.range(state.sceneCount));
+  dots.join("div")
+    .attr("class", i => "dot" + (i === state.currentScene ? " active" : i < state.currentScene ? " done" : ""))
+    .on("click", (event, i) => { state.currentScene = i; render(); });
+  d3.select("#scene-indicator").text(`Scene ${state.currentScene + 1} of ${state.sceneCount}`);
+  d3.select("#btnBack").attr("disabled", state.currentScene === 0 ? true : null);
+  d3.select("#btnNext").text(state.currentScene === state.sceneCount - 1 ? "Restart \u21bb" : "Next \u2192");
+}
+
+/* =========================================================================
+   SCENE 0 — Full overview, annotated, no interaction (martini glass stem)
+   ========================================================================= */
+function renderScene0(){
+  const x = d3.scaleLinear().domain(d3.extent(DATA, d => d.y)).range([0, width]);
+  // floor widened to -0.55 (from -0.4) so the real dataset's coldest
+  // early-1900s years don't get clipped off the bottom of the chart.
+  const y = d3.scaleLinear().domain([-0.55, 1.4]).range([height, 0]);
+
+  drawAxes(x, y);
+
+  gData.append("path").datum(DATA).attr("class", "anomaly-area").attr("d", areaFor(x, y));
+  gData.append("path").datum(DATA).attr("class", "anomaly-line").attr("d", lineFor(x, y));
+
+  const firstYear = DATA[0].y;
+  const lastYear = DATA[DATA.length - 1].y;
+  const hottest = DATA.reduce((m,d) => d.a > m.a ? d : m, DATA[0]);
+  const first1c = DATA.find(d => d.a >= 1.0);
+
+  const annoYears0 = [firstYear, 1988, (first1c||DATA[0]).y, hottest.y];
+  const av0 = yr => DATA.find(d => d.y === yr).a;
+  const annoData = buildAnnotations(x, y, [
+    {yr:firstYear, val:av0(firstYear), side:"left", dy:-40, title:"Record begins", label:`Modern instrumental record starts in ${firstYear}.`},
+    {yr:1988, val:av0(1988), side:"right", dy:-5, title:"1988: Warning to Congress", label:"NASA scientist James Hansen testifies that human-caused warming has begun."},
+    {yr:(first1c||DATA[0]).y, val:av0((first1c||DATA[0]).y), side:"right", dy:180, title:`${(first1c||DATA[0]).y}: First +1.0\u00b0C year`, label:"The first calendar year to exceed one full degree above baseline."},
+    {yr:hottest.y, val:av0(hottest.y), side:"right", dy:0, title:`${hottest.y}: Hottest year on record`, label:`${hottest.y} is the warmest year in the ${lastYear - firstYear + 1}-year record.`}
+  ]);
+
+  addAnnotations(annoData);
+
+  gData.selectAll(".dot-point")
+    .data(annoYears0.map(yr => DATA.find(d => d.y === yr)))
+    .join("circle")
+      .attr("class", "dot-point hot")
+      .attr("cx", d => x(d.y)).attr("cy", d => y(d.a)).attr("r", 4);
+}
+
+/* =========================================================================
+   SCENE 1 — Zoom to the last ~55 years, annotated, no interaction
+   ========================================================================= */
+function renderScene1(){
+  const lastYear = DATA[DATA.length - 1].y;
+  const recent = DATA.filter(d => d.y >= lastYear - 55);
+  const x = d3.scaleLinear().domain(d3.extent(recent, d => d.y)).range([0, width]);
+  const y = d3.scaleLinear().domain([-0.1, 1.4]).range([height, 0]);
+
+  drawAxes(x, y);
+
+  gData.append("path").datum(recent).attr("class", "anomaly-area").attr("d", areaFor(x,y));
+  gData.append("path").datum(recent).attr("class", "anomaly-line").attr("d", lineFor(x,y));
+
+  const reg = linearRegression(recent);
+  const trendData = [recent[0].y, recent[recent.length - 1].y].map(yr => ({y:yr, a:reg.slope * yr + reg.intercept}));
+  gData.append("path")
+    .datum(trendData)
+    .attr("class", "anomaly-line")
+    .attr("stroke", "#ff6b4a")
+    .attr("stroke-dasharray", "5 4")
+    .attr("d", d3.line().x(d => x(d.y)).y(d => y(d.a)));
+
+  const find = yr => recent.find(d => d.y === yr);
+  const annoSpecs = [
+    {yr:1988, side:"right", dy:-40, title:"1988", label:"Public climate testimony begins the modern policy era."},
+    {yr:1997, side:"right", dy:-100, title:"1997: Kyoto Protocol", label:"First major international treaty to limit emissions."},
+    {yr:2015, side:"right", dy:-30, title:"2015: Paris Agreement", label:"196 parties agree to hold warming well below 2\u00b0C."},
+    {yr:lastYear, side:"right", dy:150, title:"Trend is accelerating", label:"The dashed line shows the average rate of rise \u2014 recent years sit above it."}
+  ].filter(s => find(s.yr)); // skip if a year isn't in range
+
+  const annoData = buildAnnotations(x, y, annoSpecs.map(s => ({
+    yr:s.yr, val: find(s.yr).a, side:s.side, dy:s.dy, title:s.title, label:s.label
+  })));
+
+  addAnnotations(annoData);
+
+  gData.selectAll(".dot-point")
+    .data(annoSpecs.map(s => find(s.yr)))
+    .join("circle")
+      .attr("class", "dot-point hot")
+      .attr("cx", d => x(d.y)).attr("cy", d => y(d.a)).attr("r", 4);
+}
+
+function linearRegression(data){
+  const n = data.length;
+  const sumX = d3.sum(data, d => d.y);
+  const sumY = d3.sum(data, d => d.a);
+  const sumXY = d3.sum(data, d => d.y * d.a);
+  const sumX2 = d3.sum(data, d => d.y * d.y);
+  const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+  const intercept = (sumY - slope * sumX) / n;
+  return {slope, intercept};
+}
+
+/* =========================================================================
+   SCENE 2 — Free exploration (the open "bowl" of the martini glass)
+   Triggers: decade-filter buttons + hover tooltips, both update state
+   ========================================================================= */
+const DECADES = ["All", "Early", "Mid", "Recent", "Latest"];
+
+function decadeRanges(){
+  const first = DATA[0].y, last = DATA[DATA.length - 1].y;
+  const span = last - first;
+  return {
+    "All": [first, last],
+    "Early": [first, first + Math.round(span * 0.3)],
+    "Mid": [first + Math.round(span * 0.3) + 1, first + Math.round(span * 0.65)],
+    "Recent": [first + Math.round(span * 0.65) + 1, last - 10],
+    "Latest": [last - 10, last]
+  };
+}
+
+function renderScene2(){
+  d3.select("#explore-controls").style("display", "flex");
+  const controls = d3.select("#explore-controls").selectAll("button").data(DECADES);
+  controls.join("button")
+    .text(d=>d)
+    .attr("class", d => "filter-btn" + ((state.activeDecadeFilter||"All")===d ? " active" : ""))
+    .on("click", (event,d) => {
+      state.activeDecadeFilter = d;
+      drawScene2Chart();
+      d3.select("#explore-controls").selectAll("button")
+        .attr("class", dd => "filter-btn" + (dd === d ? " active" : ""));
+    });
+
+  drawScene2Chart();
+}
+
+function drawScene2Chart(){
+  gGrid.selectAll("*").remove();
+  gAxes.selectAll("*").remove();
+  gData.selectAll("*").remove();
+  gAnno.selectAll("*").remove();
+
+  const ranges = decadeRanges();
+  const filterKey = state.activeDecadeFilter || "All";
+  const [lo,hi] = ranges[filterKey];
+  const filtered = DATA.filter(d => d.y >= lo && d.y <= hi);
+
+  const x = d3.scaleLinear().domain([lo, hi]).range([0, width]);
+  const y = d3.scaleLinear().domain([-0.55, 1.4]).range([height, 0]);
+
+  drawAxes(x, y);
+
+  gData.append("path").datum(filtered).attr("class", "anomaly-area").attr("d", areaFor(x, y));
+  gData.append("path").datum(filtered).attr("class", "anomaly-line").attr("d", lineFor(x, y));
+
+  gData.selectAll(".dot-point")
+    .data(filtered)
+    .join("circle")
+      .attr("class", d => "dot-point" + (d.a >= 1.0 ? " hot" : ""))
+      .attr("cx", d => x(d.y)).attr("cy", d => y(d.a)).attr("r", 3.2)
+      .style("cursor", "pointer")
+      .on("mouseenter", function(event, d){
+        state.hoveredYear = d.y;
+        d3.select(this).attr("class", "dot-point hover");
+        tooltip.style("opacity", 1)
+          .html(`<b>${d.y}</b>: ${d.a > 0 ? "+" : ""}${d.a.toFixed(2)}\u00b0C anomaly`);
+      })
+      .on("mousemove", function(event){
+        const [mx, my] = d3.pointer(event, document.body);
+        tooltip.style("left", (mx + 14) + "px").style("top", (my - 10) + "px");
+      })
+      .on("mouseleave", function(event, d){
+        state.hoveredYear = null;
+        d3.select(this).attr("class", "dot-point" + (d.a >= 1.0 ? " hot" : ""));
+        tooltip.style("opacity", 0);
+      });
+
+  const hintPoint = filtered[Math.floor(filtered.length * 0.15)];
+  const dyFilter = {
+    "All": -60,
+    "Early": -70,
+    "Mid": -90,
+    "Recent": -60,
+    "Latest": 70
+  };
+  
+  addAnnotations(buildAnnotations(x, y, [
+    {yr:hintPoint.y, val:hintPoint.a, side:"left", dy:dyFilter[filterKey],
+     title:"Hover to explore", label:"Every point is interactive. Try the filters above to compare eras."}
+  ], 170));
+}
+
+/* =========================================================================
+   RENDER DISPATCH  (parameter -> scene template)
+   ========================================================================= */
+function render(){
+  clearLayers();
+  d3.select("#explore-controls").style("display", "none").html("");
+  d3.select("#scene-title").text(SCENES[state.currentScene].title);
+  d3.select("#scene-caption").text(SCENES[state.currentScene].caption);
+
+  if(state.currentScene === 0) renderScene0();
+  else if(state.currentScene === 1) renderScene1();
+  else renderScene2();
+
+  updateProgress();
+}
+
+/* =========================================================================
+   TRIGGERS — top-level navigation
+   ========================================================================= */
+d3.select("#btnNext").on("click", () => {
+  state.currentScene = state.currentScene < state.sceneCount - 1 ? state.currentScene + 1 : 0;
+  render();
+});
+d3.select("#btnBack").on("click", () => {
+  if(state.currentScene > 0){ state.currentScene -= 1; render(); }
+});
+
+/* =========================================================================
+   INIT — load the public CSV, then draw the first scene
+   ========================================================================= */
+d3.select("#scene-title").text("Loading data\u2026");
+d3.select("#scene-caption").text("Fetching data.csv \u2014 if this doesn't go away, see the note below.");
+
+d3.csv("data.csv", d => ({ y: +d.year, a: +d.anomaly }))
+  .then(rows => {
+    DATA = rows;
+    const first = DATA[0].y, last = DATA[DATA.length - 1].y;
+    SCENES = [
+      {
+        title: `${first}\u2013${last}: A century and a half of warming`,
+        caption: "The overview: since global record-keeping began, Earth's average surface temperature has risen by more than a full degree Celsius. Annotations mark the moments that define the story. (Exploration is disabled here \u2014 just read the shape of the trend.)"
+      },
+      {
+        title: "The last ~55 years: warming accelerates",
+        caption: "Zooming into recent decades shows what the first scene only hinted at: the rate of warming itself has increased, especially after international climate diplomacy began in earnest. (Still no exploration \u2014 focus on the acceleration.)"
+      },
+      {
+        title: "Explore the record yourself",
+        caption: "Now it's your turn. Hover any point for its exact value, and use the filters below to isolate different eras of the record."
+      }
+    ];
+    render();
+  })
+  .catch(err => {
+    d3.select("#scene-title").text("Couldn't load data.csv");
+    d3.select("#scene-caption").html(
+      "This page must be opened through a web server (e.g. <code>http://localhost:...</code> or your GitHub Pages URL) " +
+      "\u2014 not by double-clicking the file. Browsers block local file:// pages from fetching data.csv. " +
+      "Also double-check data.csv is sitting in the same folder as this file."
+    );
+    console.error(err);
+  });
+</script>
+</body>
+</html>
